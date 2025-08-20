@@ -287,6 +287,21 @@ def _parser():
             help='Number of iterations to run between convergence checks. '
             '[Default 10].')
 
+    # ###### Select Best command
+    select_best = subparsers.add_parser('select-best',
+            help='Select the best model from multiple joblib files based on loss.')
+    # input and output
+    select_best.add_argument('-i', '--input', required=True, nargs='+',
+            help='Input joblib files containing scHPF models. All models must'
+            ' have been trained with the same parameters.')
+    select_best.add_argument('-o', '--outdir', 
+            help='Output directory for the selected best model. Will be created'
+            ' if does not exist.')
+    select_best.add_argument('-p', '--prefix', default='',
+            help='Prefix for output files. Optional.')
+    select_best.add_argument('--save-all', action='store_true',
+            help="Save all models with their loss values for reference")
+
     return parser
 
 
@@ -308,6 +323,8 @@ if __name__=='__main__':
             args.outdir = args.model.rsplit('/',1)[0]
         elif args.cmd=='score':
             args.outdir = args.model.split('.joblib')[0]
+        elif args.cmd=='select-best':
+            args.outdir = os.path.dirname(args.input[0]) if len(args.input) > 0 else '.'
 
     if args.outdir is not None and not os.path.exists(args.outdir):
         print("Creating output directory {} ".format(args.outdir))
@@ -555,5 +572,112 @@ if __name__=='__main__':
 
         print('Writing commandline arguments to file.....')
         cmdfile = '{}project_commandline_args.json'.format(outprefix)
+        with open(cmdfile, 'w') as f:
+            json.dump(args.__dict__, f, indent=2)
+
+    elif args.cmd == 'select-best':
+        print('Loading models from joblib files.....')
+        models = []
+        losses = []
+        filenames = []
+
+        for model_file in args.input:
+            try:
+                model = joblib.load(model_file)
+                models.append(model)
+                filenames.append(model_file)
+
+                # Get the final loss value
+                if hasattr(model, 'loss') and len(model.loss) > 0:
+                    final_loss = model.loss[-1]
+                    # Handle case where loss might be a list (from reprojection)
+                    if isinstance(final_loss, list):
+                        final_loss = final_loss[-1]
+                    losses.append(final_loss)
+                else:
+                    print(f"Warning: Model {model_file} has no loss history")
+                    losses.append(float('inf'))
+
+            except Exception as e:
+                print(f"Error loading model {model_file}: {e}")
+                continue
+
+        if not models:
+            print("No valid models could be loaded. Exiting.")
+            sys.exit(1)
+
+        print(f'Loaded {len(models)} models successfully.')
+
+        # Check that all models have the same parameters
+        print('Verifying model parameter consistency.....')
+        reference_model = models[0]
+        for i, model in enumerate(models[1:], 1):
+            if (model.nfactors != reference_model.nfactors or
+                model.a != reference_model.a or
+                model.c != reference_model.c or
+                model.ap != reference_model.ap or
+                model.cp != reference_model.cp or 
+                model.version != reference_model.version):
+                print(f"Warning: Model {filenames[i]} has different parameters than {filenames[0]}")
+                print(f"  nfactors: {model.nfactors} vs {reference_model.nfactors}")
+                print(f"  a: {model.a} vs {reference_model.a}")
+                print(f"  c: {model.c} vs {reference_model.c}")
+                print(f"  ap: {model.ap} vs {reference_model.ap}")
+                print(f"  cp: {model.cp} vs {reference_model.cp}")
+                print(f"  version: {model.version} vs {reference_model.version}")
+                raise ValueError(f"Model parameters are not consistent ({filenames[i]} has different parameters than {filenames[0]})")
+
+        # Find the best model based on loss
+        print('Selecting best model based on loss.....')
+        best_idx = np.argmin(losses)
+        best_model = models[best_idx]
+        best_loss = losses[best_idx]
+        best_filename = filenames[best_idx]
+
+        print(f'Best model: {best_filename}')
+        print(f'Best loss: {best_loss:.6f}')
+
+        # Print all models and their losses
+        print('\nAll models and their losses:')
+        for i, (filename, loss) in enumerate(zip(filenames, losses)):
+            marker = ' *' if i == best_idx else ''
+            print(f'  {filename}: {loss:.6f}{marker}')
+
+        # Save the best model
+        print('Saving best model.....')
+        K = best_model.nfactors
+        ncells = best_model.ncells if best_model.ncells else 'unknown'
+        batchsize_suffix = f'_b{ncells}' if hasattr(best_model, 'batchsize') and best_model.batchsize else ''
+
+        model_outprefix = '{}scHPF_K{}{}_best'.format(
+                outprefix, K, batchsize_suffix)
+
+        print('Saving best model ({} factors).....'.format(K))
+        joblib.dump(best_model, model_outprefix + '.joblib')
+
+        # Save all models if requested
+        if args.save_all:
+            print('Saving all models with loss information.....')
+            for i, (model, loss, filename) in enumerate(zip(models, losses, filenames)):
+                base_name = os.path.splitext(os.path.basename(filename))[0]
+                model_outprefix_all = '{}scHPF_K{}{}_{}_loss{:.6f}'.format(
+                        outprefix, K, batchsize_suffix, base_name, loss)
+                joblib.dump(model, model_outprefix_all + '.joblib')
+
+        # Save loss comparison summary
+        print('Saving loss comparison summary.....')
+        summary_data = {
+            'filename': filenames,
+            'loss': losses,
+            'nfactors': [m.nfactors for m in models],
+            'ncells': [m.ncells for m in models],
+            'ngenes': [m.ngenes for m in models]
+        }
+        summary_df = pd.DataFrame(summary_data)
+        summary_df['is_best'] = summary_df.index == best_idx
+        summary_df.to_csv(outprefix + 'model_comparison_summary.csv', index=False)
+
+        print('Writing commandline arguments to file.....')
+        cmdfile = '{}select-best_commandline_args.json'.format(outprefix)
         with open(cmdfile, 'w') as f:
             json.dump(args.__dict__, f, indent=2)
