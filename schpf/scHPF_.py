@@ -653,6 +653,7 @@ class scHPF(BaseEstimator):
                 random_phi = np.random.dirichlet( np.ones(nfactors),
                         X_batch.data.shape[0])
                 Xphi_data = X_batch.data[:,None] * random_phi
+                del random_phi # free memory
             else:
                 if single_process:
                     Xphi_data = compute_Xphi_data_numpy(X_batch, theta, beta,
